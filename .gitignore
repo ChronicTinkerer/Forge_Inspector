@@ -1,0 +1,56 @@
+# LibCodex-1.0 .gitignore
+# Tracks: source code (Lua/XML/TOC), build tools, embedded libs, bundled Data.
+# Ignores: regenerable artifacts, caches, machine-specific config, editor junk.
+
+# ---- Generated import artifacts ------------------------------------------
+# These are produced by tools/import-wago.py and tools/crawl-wowhead.py.
+# Multi-hundred-MB Lua files; regenerate from source whenever needed.
+wago-import.lua
+wowhead-import.lua
+test-*.lua
+*-import.lua
+
+# ---- Tool caches ---------------------------------------------------------
+# Downloaded CSV exports and HTML pages. Recreated on demand by the tools.
+.wago-cache/
+.wowhead-cache/
+
+# ---- Bake backups --------------------------------------------------------
+# bake.py writes a timestamped copy of each Data/*.lua before overwriting.
+# These accumulate quickly; never want them in git.
+.bake-backup/
+**/.bake-backup/
+
+# ---- Local bake configs --------------------------------------------------
+# bake-config*.lua files contain absolute paths specific to the user's
+# WoW install / SavedVariables location. Per-user, never commit.
+# (If you want to share an example template, check in `bake-config.lua.example`
+# instead.)
+tools/*
+
+# ---- Python build artifacts ---------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ---- Editor / IDE -------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+.claude/
+
+# ---- OS junk ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Misc backups -------------------------------------------------------
+*.bak
+*.orig
+*.tmp

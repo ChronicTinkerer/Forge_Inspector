@@ -1,0 +1,12 @@
+## Interface: 120005
+## Title: Forge_Inspector
+## Notes: Real-time _G tree browser with type display, per-level search, 0.5s auto-poll on expanded nodes, pinnable watch list. Adds an Inspector tab to /forge.
+## Author: ChronicTinkerer
+## Version: 2605040605
+## SavedVariables: ForgeInspectorDB
+## Dependencies: Cairn, Forge
+## X-Category: Development Tools
+## X-License: All Rights Reserved
+
+UI.lua
+Core.lua
