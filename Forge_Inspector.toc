@@ -2,7 +2,7 @@
 ## Title: Forge_Inspector
 ## Notes: Real-time _G tree browser with type display, per-level search, 0.5s auto-poll on expanded nodes, pinnable watch list. Adds an Inspector tab to /forge.
 ## Author: ChronicTinkerer
-## Version: 2605040605
+## Version: 2605041020
 ## SavedVariables: ForgeInspectorDB
 ## Dependencies: Cairn, Forge
 ## X-Category: Development Tools

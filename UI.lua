@@ -34,9 +34,8 @@ local SPLIT_RATIO = 0.6   -- tree pane width fraction
 
 -- The expensive part of expanding `_G` was creating ~10k UI Frames in one
 -- tick, not iterating Lua tables. We use a small pool of row buttons
--- (VISIBLE_ROW_BUFFER) and recycle them as the user scrolls. This is the
--- HybridScrollFrame pattern DevTool uses; here we roll our own to stay
--- pure-Lua. With virtualization there is no need to cap children.
+-- (VISIBLE_ROW_BUFFER) and recycle them as the user scrolls. With
+-- virtualization there is no need to cap children.
 --
 -- Paranoia cap only - if some addon installs an absurdly large table this
 -- still bounds the closure-creation work.
@@ -65,7 +64,6 @@ local function escapeBars(s) return (tostring(s)):gsub("|", "||") end
 -- taint to our addon's execution and blocks secure operations until the
 -- next /reload. The Blizzard API exposes detection functions; we check
 -- BEFORE iterating, so we never pair() a forbidden table at all.
--- (Reference: DevTool's Utils.lua applies the same guard.)
 local function isSecret(v)
     if type(v) ~= "table" then
         if issecretvalue and issecretvalue(v) then return true end
@@ -198,8 +196,7 @@ local function buildChildren(node)
     end
 
     -- Append $metatable / $metatable.__index entries when expanding a real
-    -- table (not the synthetic root view). Mirrors DevTool's behavior so
-    -- you can drill into Mixin chains (frames, Ace addon objects, etc).
+    -- table so you can drill into Mixin chains (frames, addon objects, etc).
     local mt
     pcall(function() mt = getmetatable(v) end)
     if type(mt) == "table" and not isUntouchable(mt) then
@@ -605,8 +602,10 @@ function UI.Build(parent, mod)
     end
     local watchTabBtn  = makeTabBtn("Watch",  nil, 0)
     local eventsTabBtn = makeTabBtn("Events", watchTabBtn, 4)
+    local fnlogTabBtn  = makeTabBtn("FnLog",  eventsTabBtn, 4)
     mod._watchTabBtn  = watchTabBtn
     mod._eventsTabBtn = eventsTabBtn
+    mod._fnlogTabBtn  = fnlogTabBtn
 
     -- ----- Watch panel (existing watch list, now in a sub-frame) ------
     local watchPanel = CreateFrame("Frame", nil, rightBg)
@@ -714,14 +713,105 @@ function UI.Build(parent, mod)
     mod._evtLogText:SetJustifyH("LEFT"); mod._evtLogText:SetJustifyV("TOP")
     mod._evtLogText:SetWordWrap(true)
 
+    -- ----- FnLog panel -------------------------------------------------
+    local fnPanel = CreateFrame("Frame", nil, rightBg)
+    fnPanel:SetPoint("TOPLEFT",     watchTabBtn, "BOTTOMLEFT", -2, -4)
+    fnPanel:SetPoint("BOTTOMRIGHT", rightBg,     "BOTTOMRIGHT", -6, 6)
+    fnPanel:Hide()
+    mod._fnPanel = fnPanel
+
+    local fnInputBg = CreateFrame("Frame", nil, fnPanel, "BackdropTemplate")
+    fnInputBg:SetPoint("TOPLEFT", 6, -2)
+    fnInputBg:SetSize(180, 22)
+    fnInputBg:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    fnInputBg:SetBackdropColor(0.04, 0.04, 0.04, 0.40)
+    fnInputBg:SetBackdropBorderColor(0.4, 0.3, 0.15, 1)
+    local fnInput = CreateFrame("EditBox", nil, fnInputBg)
+    fnInput:SetMultiLine(false); fnInput:SetAutoFocus(false)
+    fnInput:SetFontObject("ChatFontNormal")
+    fnInput:SetPoint("LEFT", 6, 0); fnInput:SetPoint("RIGHT", -6, 0); fnInput:SetHeight(18)
+    fnInput:SetScript("OnEnterPressed", function(self)
+        UI.AddFnLogFromInput(self:GetText()); self:SetText(""); self:ClearFocus()
+    end)
+    fnInput:SetScript("OnEscapePressed", function(self) self:ClearFocus(); self:SetText("") end)
+    local fnHint = fnInputBg:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    fnHint:SetPoint("LEFT", 8, 0); fnHint:SetText("_G.UIParent.Show ...")
+    fnInput:SetScript("OnEditFocusGained", function() fnHint:Hide() end)
+    fnInput:SetScript("OnEditFocusLost",  function(self)
+        if (self:GetText() or "") == "" then fnHint:Show() end
+    end)
+    mod._fnInput = fnInput
+
+    local addFnBtn = CreateFrame("Button", nil, fnPanel, "UIPanelButtonTemplate")
+    addFnBtn:SetSize(50, 22)
+    addFnBtn:SetPoint("LEFT", fnInputBg, "RIGHT", 4, 0)
+    addFnBtn:SetText("Add")
+    addFnBtn:SetScript("OnClick", function()
+        UI.AddFnLogFromInput(fnInput:GetText()); fnInput:SetText("")
+    end)
+
+    local clearFnBtn = CreateFrame("Button", nil, fnPanel, "UIPanelButtonTemplate")
+    clearFnBtn:SetSize(60, 22)
+    clearFnBtn:SetPoint("LEFT", addFnBtn, "RIGHT", 4, 0)
+    clearFnBtn:SetText("Clear")
+    clearFnBtn:SetScript("OnClick", function()
+        if ns.ClearFnCallLog then ns.ClearFnCallLog() end
+        UI.RefreshFnLogPane()
+    end)
+
+    local fnListLabel = fnPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    fnListLabel:SetPoint("TOPLEFT", fnInputBg, "BOTTOMLEFT", 0, -8)
+    fnListLabel:SetText("|cffd87f3aWatching:|r")
+
+    local fnListScroll = CreateFrame("ScrollFrame", nil, fnPanel, "UIPanelScrollFrameTemplate")
+    fnListScroll:SetPoint("TOPLEFT", fnListLabel, "BOTTOMLEFT", 0, -2)
+    fnListScroll:SetPoint("RIGHT",   fnPanel,     "RIGHT", -28, 0)
+    fnListScroll:SetHeight(90)
+    local fnListContent = CreateFrame("Frame", nil, fnListScroll)
+    fnListContent:SetSize(1, 1)
+    fnListScroll:SetScrollChild(fnListContent)
+    mod._fnListScroll  = fnListScroll
+    mod._fnListContent = fnListContent
+    mod._fnListRows    = {}
+
+    local fnLogLabel = fnPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    fnLogLabel:SetPoint("TOPLEFT", fnListScroll, "BOTTOMLEFT", 0, -8)
+    fnLogLabel:SetText("|cffd87f3aRecent calls|r")
+    mod._fnLogLabel = fnLogLabel
+
+    local fnLogScroll = CreateFrame("ScrollFrame", nil, fnPanel, "UIPanelScrollFrameTemplate")
+    fnLogScroll:SetPoint("TOPLEFT",     fnLogLabel, "BOTTOMLEFT", 0, -2)
+    fnLogScroll:SetPoint("BOTTOMRIGHT", fnPanel,    "BOTTOMRIGHT", -28, 6)
+    local fnLogContent = CreateFrame("Frame", nil, fnLogScroll)
+    fnLogContent:SetSize(1, 1)
+    fnLogScroll:SetScrollChild(fnLogContent)
+    mod._fnLogScroll  = fnLogScroll
+    mod._fnLogContent = fnLogContent
+    mod._fnLogText = fnLogContent:CreateFontString(nil, "ARTWORK", "ChatFontSmall")
+    mod._fnLogText:SetPoint("TOPLEFT", 4, -2)
+    mod._fnLogText:SetJustifyH("LEFT"); mod._fnLogText:SetJustifyV("TOP")
+    mod._fnLogText:SetWordWrap(true)
+
     -- Tab handlers
-    watchTabBtn:SetScript("OnClick",  function() UI.SelectRightTab("watch") end)
+    watchTabBtn:SetScript("OnClick",  function() UI.SelectRightTab("watch")  end)
     eventsTabBtn:SetScript("OnClick", function() UI.SelectRightTab("events") end)
+    fnlogTabBtn:SetScript("OnClick",  function() UI.SelectRightTab("fnlog")  end)
 
     -- Subscribe to event log changes so the panel auto-refreshes.
     if ns.SubscribeEventLog then
         mod._evtUnsub = ns.SubscribeEventLog(function()
             if mod._activeRightTab == "events" then UI.RefreshEventsPane() end
+        end)
+    end
+    -- Same for fnLog.
+    if ns.SubscribeFnLog then
+        mod._fnUnsub = ns.SubscribeFnLog(function()
+            if mod._activeRightTab == "fnlog" then UI.RefreshFnLogPane() end
         end)
     end
 
@@ -955,18 +1045,22 @@ function UI.OnTabShow(mod)
     if UI.RefreshEventsPane then UI.RefreshEventsPane() end
 end
 
--- ----- Right-pane tabs (Watch | Events) ---------------------------------
+-- ----- Right-pane tabs (Watch | Events | FnLog) -------------------------
 function UI.SelectRightTab(name)
     local mod = _activeMod
     if not mod then return end
     mod._activeRightTab = name
+    if mod._watchPanel  then mod._watchPanel:Hide()  end
+    if mod._eventsPanel then mod._eventsPanel:Hide() end
+    if mod._fnPanel     then mod._fnPanel:Hide()     end
     if name == "events" then
-        if mod._watchPanel  then mod._watchPanel:Hide()  end
         if mod._eventsPanel then mod._eventsPanel:Show() end
         UI.RefreshEventsPane()
+    elseif name == "fnlog" then
+        if mod._fnPanel then mod._fnPanel:Show() end
+        UI.RefreshFnLogPane()
     else
-        if mod._eventsPanel then mod._eventsPanel:Hide() end
-        if mod._watchPanel  then mod._watchPanel:Show()  end
+        if mod._watchPanel then mod._watchPanel:Show() end
     end
 end
 
@@ -1083,6 +1177,122 @@ function UI.RefreshEventsPane()
     if mod._evtLogLabel then
         mod._evtLogLabel:SetText(string.format(
             "|cffd87f3aRecent fires|r  |cffaaaaaa(%d entries, newest at bottom)|r", #log))
+    end
+end
+
+-- ----- FnLog pane -------------------------------------------------------
+function UI.AddFnLogFromInput(text)
+    text = text and text:match("^%s*(.-)%s*$") or ""
+    if text == "" then return end
+    -- Split on the LAST dot: parent.fn -> "parent", "fn".
+    local parentPath, fnName = text:match("^(.-)%.([^%.]+)$")
+    if not parentPath or parentPath == "" or not fnName or fnName == "" then
+        if ns.out then ns.out("usage: <parent>.<fn> -  e.g. _G.UIParent.Show") end
+        return
+    end
+    if not parentPath:match("^_G") then parentPath = "_G." .. parentPath end
+    if not ns.AddFnLog then return end
+    if ns.AddFnLog(parentPath, fnName) then
+        if ns.out then ns.out("logging calls to " .. parentPath .. "." .. fnName) end
+        UI.RefreshFnLogPane()
+    else
+        if ns.out then ns.out("already logging or fn not found: " .. parentPath .. "." .. fnName) end
+    end
+end
+
+local function buildFnListRow(parent, mod)
+    -- Same shape as the event watch row: checkbox + label + remove.
+    local row = CreateFrame("Frame", nil, parent)
+    row:SetHeight(20)
+
+    local cb = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+    cb:SetSize(18, 18)
+    cb:SetPoint("LEFT", row, "LEFT", 0, 0)
+    row._cb = cb
+
+    local fs = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    fs:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+    fs:SetPoint("RIGHT", row, "RIGHT", -22, 0)
+    fs:SetJustifyH("LEFT"); fs:SetWordWrap(false); fs:SetMaxLines(1)
+    row._fs = fs
+
+    local rm = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+    rm:SetSize(18, 18)
+    rm:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+    rm:SetText("x")
+    row._rm = rm
+
+    return row
+end
+
+function UI.RefreshFnLogPane()
+    local mod = _activeMod
+    if not (mod and mod._fnListContent) then return end
+
+    -- Watching list
+    local logs = ns.GetFnLogs and ns.GetFnLogs() or {}
+    local keys = {}
+    for k in pairs(logs) do keys[#keys + 1] = k end
+    table.sort(keys)
+
+    for _, row in ipairs(mod._fnListRows) do row:Hide() end
+
+    local y = 0
+    for i, key in ipairs(keys) do
+        local w = logs[key]
+        local row = mod._fnListRows[i]
+        if not row then
+            row = buildFnListRow(mod._fnListContent, mod)
+            mod._fnListRows[i] = row
+        end
+        row._cb:SetChecked(w.active and true or false)
+        row._cb:SetScript("OnClick", function(self)
+            if ns.SetFnLogActive then ns.SetFnLogActive(w.parentPath, w.fnName, self:GetChecked() and true or false) end
+        end)
+        local label = w.parentPath .. "." .. w.fnName
+        if (w.callCount or 0) > 0 then
+            label = string.format("%s  |cffaaaaaa(%dx)|r", label, w.callCount)
+        end
+        if not w.active then label = label .. "  |cffff8080(off)|r" end
+        row._fs:SetText(label)
+        row._rm:SetScript("OnClick", function()
+            if ns.RemoveFnLog then ns.RemoveFnLog(w.parentPath, w.fnName) end
+            UI.RefreshFnLogPane()
+        end)
+        row:ClearAllPoints()
+        row:SetWidth(mod._fnListScroll:GetWidth() - 8)
+        row:SetPoint("TOPLEFT", mod._fnListContent, "TOPLEFT", 0, -y)
+        row:Show()
+        y = y + 20
+    end
+    if y < 1 then y = 1 end
+    mod._fnListContent:SetHeight(y)
+    mod._fnListScroll:UpdateScrollChildRect()
+
+    -- Recent calls log
+    local function fmtTime(ts)
+        if not ts then return "?" end
+        if date then return date("%H:%M:%S", ts) end
+        return tostring(ts)
+    end
+    local log = ns.GetFnCallLog and ns.GetFnCallLog() or {}
+    local lines = {}
+    for _, e in ipairs(log) do
+        lines[#lines + 1] = string.format(
+            "|cffaaaaaa[%s]|r |cffd87f3a%s.%s|r(%s)  |cffaaaaaa->|r %s",
+            fmtTime(e.ts), e.parentPath, e.fnName, e.args or "", e.returns or "")
+    end
+    if mod._fnLogText then
+        mod._fnLogText:SetText(table.concat(lines, "\n"))
+        mod._fnLogText:SetWidth(mod._fnLogScroll:GetWidth() - 8)
+        local h = mod._fnLogText:GetStringHeight() + 8
+        mod._fnLogContent:SetSize(mod._fnLogScroll:GetWidth() - 8, math.max(1, h))
+        mod._fnLogScroll:UpdateScrollChildRect()
+        mod._fnLogScroll:SetVerticalScroll(math.max(0, h - (mod._fnLogScroll:GetHeight() or 0)))
+    end
+    if mod._fnLogLabel then
+        mod._fnLogLabel:SetText(string.format(
+            "|cffd87f3aRecent calls|r  |cffaaaaaa(%d entries)|r", #log))
     end
 end
 

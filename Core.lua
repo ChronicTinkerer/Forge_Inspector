@@ -276,13 +276,15 @@ local function wrapFn(parentPath, fnName)
     _originals[parentPath] = _originals[parentPath] or {}
     _originals[parentPath][fnName] = original
 
+    -- Capture return-count + values WITHOUT calling original twice
+    -- (which would fire side effects twice). The inner `pack` is a varargs
+    -- trick: select("#", ...) sees every return slot including trailing nils.
+    local function pack(...) return select("#", ...), { ... } end
+
     parent[fnName] = function(...)
         local argc = select("#", ...)
         local args = { ... }
-        local rets = { original(...) }
-        local retc = select("#", original(...))   -- re-call to count? expensive
-        -- Instead: select on rets table directly.
-        retc = #rets
+        local retc, rets = pack(original(...))
         local w = db.profile.fnLogs and db.profile.fnLogs[fnKey(parentPath, fnName)]
         if w then w.callCount = (w.callCount or 0) + 1 end
         logFnCall(parentPath, fnName, argc, args, retc, rets)
@@ -421,6 +423,8 @@ function addon:OnLogin()
 
     -- Re-register all active event watches that survived /reload.
     ns.RecheckEventRegistrations()
+    -- Re-wrap all active function-call logs.
+    ns.RecheckFnLogs()
 
     if Forge and Forge.slash then
         Forge.slash:Subcommand("inspectwatch", function()
@@ -433,7 +437,7 @@ function addon:OnLogin()
         Forge.slash:Subcommand("inspectpin", function(rest)
             local path = rest and rest:match("^%s*(.-)%s*$") or ""
             if path == "" then
-                out("usage: /forge inspectpin <_G.path>  (e.g. /forge inspectpin _G.DevTool)")
+                out("usage: /forge inspectpin <_G.path>  (e.g. /forge inspectpin _G.Forge)")
                 return
             end
             if not path:match("^_G") then path = "_G." .. path end
